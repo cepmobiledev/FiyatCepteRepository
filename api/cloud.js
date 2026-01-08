@@ -237,6 +237,7 @@ async function handleSource(req, res) {
   }
 
   const type = req.query && req.query.type ? String(req.query.type) : 'gasoline';
+  const city = req.query && req.query.city ? String(req.query.city) : 'istanbul';
   const limitRaw = req.query && req.query.limit ? String(req.query.limit) : '10';
   const limit = Math.max(1, Math.min(50, Number.parseInt(limitRaw, 10) || 10));
 
@@ -247,7 +248,7 @@ async function handleSource(req, res) {
   }
 
   const base = process.env.COLLECTAPI_BASE_URL || 'https://api.collectapi.com/gasPrice';
-  const url = `${base.replace(/\/$/, '')}/${pathSuffix}`;
+  const url = `${base.replace(/\/$/, '')}/${pathSuffix}?city=${encodeURIComponent(city)}`;
 
   const response = await fetch(url, {
     headers: {
