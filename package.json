@@ -1,8 +1,0 @@
-{
-	"name": "fiyat-cepte-cloud-api",
-	"private": true,
-	"type": "commonjs",
-	"engines": {
-		"node": "20.x"
-	}
-}
