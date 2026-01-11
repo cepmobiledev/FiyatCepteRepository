@@ -107,7 +107,8 @@ async function fetchPetrolOfisiPrices() {
       const tdMatches = [...match[0].matchAll(/<span class="with-tax">(\d+\.\d+)<\/span>/g)];
       const benzin = tdMatches[0] ? parseMaybeNumber(tdMatches[0][1]) : null;
       const motorin = tdMatches[1] ? parseMaybeNumber(tdMatches[1][1]) : null;
-      const lpg = tdMatches.length > 0 ? parseMaybeNumber(tdMatches[tdMatches.length - 1][1]) : null;
+      // 7. sütun varsa LPG olarak al
+      const lpg = tdMatches[6] ? parseMaybeNumber(tdMatches[6][1]) : null;
       if (benzin != null || motorin != null || lpg != null) {
         const cityKey = cityName.toUpperCase();
         if (!pricesByCity[cityKey]) pricesByCity[cityKey] = {};
