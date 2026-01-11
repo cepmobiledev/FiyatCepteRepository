@@ -1,22 +1,14 @@
 {
   "rewrites": [
     {
-      "source": "/api/prices",
-      "destination": "/api/cloud"
-    },
-    {
-      "source": "/api/update",
-      "destination": "/api/cloud"
-    },
-    {
-      "source": "/api/health",
-      "destination": "/api/cloud"
+      "source": "/api/:path*",
+      "destination": "/api/cloud.js"
     }
   ],
   "crons": [
     {
-      "path": "/api/cloud",
-      "schedule": "0 3 * * *"
+      "path": "/api/update",
+      "schedule": "0 4 * * *"
     }
   ]
 }
