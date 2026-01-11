@@ -366,28 +366,9 @@ async function scrapeAndStoreAllPrices() {
   }
   // ... Diğer markalar ...
 
-  // Şehir ortalamalarını hesapla
-  let cityAverages = calculateCityAverages(allResults);
-  // Eğer hiç fiyat yoksa veya bazı şehirlerde hiç veri yoksa, KV'den yedek fiyatı çek
-  if (!cityAverages || Object.keys(cityAverages).length === 0) {
-    const backup = await kvGetJson('fuel:prices');
-    if (backup && backup.prices) {
-      cityAverages = backup.prices;
-    }
-  } else {
-    // Eksik şehirler için yedek KV'den tamamla
-    const backup = await kvGetJson('fuel:prices');
-    if (backup && backup.prices) {
-      for (const city in backup.prices) {
-        if (!cityAverages[city]) {
-          cityAverages[city] = backup.prices[city];
-        }
-      }
-    }
-  }
-  // KV'ye kaydet
+  // KV'ye her firmanın fiyatlarını ayrı ayrı kaydet
   const dataToStore = {
-    prices: cityAverages,
+    allFirmPrices: allResults,
     lastUpdate: new Date().toISOString(),
     sources,
   };
@@ -411,7 +392,7 @@ async function handlePrices(req, res) {
   // KV'den fiyatları çek
   const kvData = await kvGetJson('fuel:prices');
   if (kvData && typeof kvData === 'object') {
-    const prices = kvData.prices && typeof kvData.prices === 'object' ? kvData.prices : {};
+    const prices = kvData.allFirmPrices && typeof kvData.allFirmPrices === 'object' ? kvData.allFirmPrices : {};
     const lastUpdate = kvData.lastUpdate ?? null;
     return res.status(200).json({ prices, lastUpdate });
   }
