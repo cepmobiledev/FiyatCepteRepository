@@ -96,17 +96,20 @@ async function fetchPetrolOfisiPrices() {
     // <td>ANKARA</td>
     // <td><span class="with-tax">54.00</span>...</td> (benzin)
     // <td><span class="with-tax">55.58</span>...</td> (motorin)
-    // <td><span class="with-tax">45.22</span>...</td> (lpg)
-    const cityPattern = /price-row[^>]+data-disctrict-name="([^"\n]+)"[\s\S]*?<span class="with-tax">(\d+\.\d+)<\/span>[\s\S]*?<span class="with-tax">(\d+\.\d+)<\/span>[\s\S]*?<span class="with-tax">(\d+\.\d+)<\/span>/g;
+    // ... diğer sütunlar ...
+    // <td><span class="with-tax">29.29</span>...</td> (LPG/otogaz)  <--- 7. sütun!
+    const cityPattern = /price-row[^>]+data-disctrict-name="([^"\n]+)"[\s\S]*?<span class="with-tax">(\d+\.\d+)<\/span>[\s\S]*?<span class="with-tax">(\d+\.\d+)<\/span>[\s\S]*?<span class="with-tax">(\d+\.\d+)<\/span>[\s\S]*?<span class="with-tax">(\d+\.\d+)<\/span>[\s\S]*?<span class="with-tax">(\d+\.\d+)<\/span>[\s\S]*?<span class="with-tax">(\d+\.\d+)<\/span>[\s\S]*?<span class="with-tax">(\d+\.\d+)<\/span>/g;
     let match;
     while ((match = cityPattern.exec(html)) !== null) {
       let cityName = match[1].trim();
-      cityName = cityName.replace(/\s*\([^)]+\)/, '').trim();
+      // Parantez içini de dahil et, ör: 'İSTANBUL (AVRUPA)' -> 'İSTANBUL AVRUPA'
+      cityName = cityName.replace(/[()]/g, '').replace(/\s+/g, ' ').trim();
       const benzin = parseMaybeNumber(match[2]);
       const motorin = parseMaybeNumber(match[3]);
-      const lpg = parseMaybeNumber(match[4]);
+      const lpg = parseMaybeNumber(match[8]); // 7. sütun (8. grup)
       if (benzin != null || motorin != null || lpg != null) {
-        const cityKey = normalizeCityKey(cityName);
+        // Şehir adını büyük harf ve boşluklu olarak kullan (ör: 'ISTANBUL AVRUPA')
+        const cityKey = cityName.toUpperCase();
         if (!pricesByCity[cityKey]) pricesByCity[cityKey] = {};
         if (benzin != null) pricesByCity[cityKey].benzin = benzin;
         if (motorin != null) pricesByCity[cityKey].motorin = motorin;
