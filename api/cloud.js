@@ -1,33 +1,24 @@
-// cloud.js - GERÇEK POMPA SATIŞ FİYATLARI API
-// Kaynak: EPDK taban fiyatları + Perakende satış marjı (%27.5)
+// api/cloud.js
+// Pompa fiyatları toplayıcı (KV cache + günlük cron için uygun)
+
+const MAX_AGE_HOURS = 12; // prices endpoint'i, veri 12 saatten eskiyse update yapar
 
 ///////////////////////////
-// KV BAĞLANTISI
+// KV (Upstash/Vercel KV REST)
 ///////////////////////////
-
 async function redisCmd(args) {
   const url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_KV_REST_API_URL;
   const token = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_KV_REST_API_TOKEN;
 
-  if (!url || !token) {
-    console.error("KV env missing");
-    return { ok: false, result: null, error: "KV env missing" };
-  }
+  if (!url || !token) return { ok: false, result: null, error: "KV env missing" };
 
   try {
     const response = await fetch(url, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify(args),
     });
-
-    if (!response.ok) {
-      return { ok: false, result: null, error: `KV HTTP ${response.status}` };
-    }
-
+    if (!response.ok) return { ok: false, result: null, error: `KV HTTP ${response.status}` };
     const json = await response.json().catch(() => null);
     if (!json) return { ok: false, result: null, error: "KV bad json" };
     if (json.error) return { ok: false, result: null, error: String(json.error) };
@@ -39,8 +30,7 @@ async function redisCmd(args) {
 
 async function kvGetJson(key) {
   const { ok, result } = await redisCmd(["GET", key]);
-  if (!ok || result == null) return null;
-  if (typeof result !== "string") return null;
+  if (!ok || result == null || typeof result !== "string") return null;
   try {
     return JSON.parse(result);
   } catch {
@@ -55,9 +45,8 @@ async function kvSetJson(key, value) {
 }
 
 ///////////////////////////
-// HELPER FONKSİYONLAR
+// Helpers
 ///////////////////////////
-
 function normalizeCityKey(input) {
   if (!input) return "";
   return String(input)
@@ -73,125 +62,203 @@ function normalizeCityKey(input) {
     .replace(/\s+/g, "_");
 }
 
-///////////////////////////
-// POMPA SATIŞ FİYATI HESAPLAMA SİSTEMİ
-// EPDK taban fiyatı × 1.275 = GERÇEK POMPA SATIŞ FİYATI
-///////////////////////////
+function parseTrNumber(s) {
+  if (s == null) return null;
+  const txt = String(s).replace(/\s+/g, " ").trim();
+  const m = txt.match(/(\d{1,3}(?:[.,]\d{1,2})?)/);
+  if (!m) return null;
+  const num = m[1].replace(/\./g, "").replace(",", ".");
+  const v = Number(num);
+  return Number.isFinite(v) ? v : null;
+}
 
-// PERAKENDE SATIŞ MARJI: %27.5 (Gerçek pompa fiyatları analizi)
-const RETAIL_MARGIN = 1.275;
+function hoursSince(iso) {
+  if (!iso) return Infinity;
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return Infinity;
+  return (Date.now() - t) / 36e5;
+}
 
-// EPDK taban fiyatları (haftalık manuel güncelleme gerekli)
-// Kaynak: https://www.epdk.gov.tr/Detail/Icerik/3-0-94/aylik-yakit-fiyatlari
-const EPDK_BASE_PRICES = {
-  "ISTANBUL": { benzin: 41.20, motorin: 42.10, lpg: 22.80 },
-  "ANKARA": { benzin: 41.00, motorin: 41.90, lpg: 22.60 },
-  "IZMIR": { benzin: 41.10, motorin: 42.00, lpg: 22.70 },
-  "ISPARTA": { benzin: 43.30, motorin: 44.80, lpg: 22.93 }, // Gerçek EPDK fiyatı
-  "ADANA": { benzin: 41.05, motorin: 41.95, lpg: 22.65 },
-  "ANTALYA": { benzin: 41.15, motorin: 42.05, lpg: 22.75 },
-  "BURSA": { benzin: 41.08, motorin: 41.98, lpg: 22.68 },
-  "KONYA": { benzin: 40.95, motorin: 41.85, lpg: 22.55 },
-  "GAZIANTEP": { benzin: 41.00, motorin: 41.90, lpg: 22.60 },
-  "KAYSERI": { benzin: 40.92, motorin: 41.82, lpg: 22.52 },
-};
+async function fetchHtml(url) {
+  const res = await fetch(url, {
+    method: "GET",
+    headers: {
+      "User-Agent": "Mozilla/5.0 (compatible; fiyat-cepte/1.0; +https://vercel.com/)",
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    },
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status} ${url}`);
+  return await res.text();
+}
 
-// Şehir için GERÇEK POMPA SATIŞ FİYATLARINI hesapla
-function calculateRealPumpPrices(cityName) {
-  const cityKey = normalizeCityKey(cityName);
-  
-  // EPDK taban fiyatını al (yoksa genel ortalama kullan)
-  const basePrice = EPDK_BASE_PRICES[cityKey] || {
-    benzin: 41.00,
-    motorin: 41.90,
-    lpg: 22.60
-  };
+function toBrandCityShape(pricesByCityByBrand) {
+  // input: { BRAND: { CITY: {...} } } zaten bu formatta olacak
+  return pricesByCityByBrand;
+}
 
-  // TÜM MARKALAR İÇİN AYNI FİYATLAR (EPDK + %27.5 marj)
-  const realPumpPrice = {
-    benzin: parseFloat((basePrice.benzin * RETAIL_MARGIN).toFixed(2)),
-    motorin: parseFloat((basePrice.motorin * RETAIL_MARGIN).toFixed(2)),
-    lpg: parseFloat((basePrice.lpg * RETAIL_MARGIN).toFixed(2)),
-  };
-
-  // Tüm markalar için aynı pompa satış fiyatı
-  const cityPrices = {
-    "SHELL": { ...realPumpPrice },
-    "BP": { ...realPumpPrice },
-    "PETROL_OFISI": { ...realPumpPrice },
-    "OPET": { ...realPumpPrice },
-    "TOTAL": { ...realPumpPrice },
-    "AYTEMIZ": { ...realPumpPrice },
-  };
-
-  return cityPrices;
+function ensure(obj, k, init) {
+  if (!obj[k]) obj[k] = init;
+  return obj[k];
 }
 
 ///////////////////////////
-// TÜM TÜRKİYE ŞEHİRLERİ
+// Scrapers (Kaynak bazlı)
+// Not: HTML değişirse selector/regex güncellemek gerekebilir. [web:111]
 ///////////////////////////
+async function scrapePetrolOfisi() {
+  const url = "https://www.petrolofisi.com.tr/akaryakit-fiyatlari"; // il bazlı tablo içerir [web:23]
+  const html = await fetchHtml(url);
 
-const ALL_CITIES = [
-  "ADANA", "ADIYAMAN", "AFYONKARAHISAR", "AGRI", "AKSARAY", "AMASYA", "ANKARA",
-  "ANTALYA", "ARDAHAN", "ARTVIN", "AYDIN", "BALIKESIR", "BARTIN", "BATMAN",
-  "BAYBURT", "BILECIK", "BINGOL", "BITLIS", "BOLU", "BURDUR", "BURSA", "CANAKKALE",
-  "CANKIRI", "CORUM", "DENIZLI", "DIYARBAKIR", "DUZCE", "EDIRNE", "ELAZIG",
-  "ERZINCAN", "ERZURUM", "ESKISEHIR", "GAZIANTEP", "GIRESUN", "GUMUSHANE",
-  "HAKKARI", "HATAY", "IGDIR", "ISPARTA", "ISTANBUL", "IZMIR", "KAHRAMANMARAS",
-  "KARABUK", "KARAMAN", "KARS", "KASTAMONU", "KAYSERI", "KIRIKKALE", "KIRKLARELI",
-  "KIRSEHIR", "KILIS", "KOCAELI", "KONYA", "KUTAHYA", "MALATYA", "MANISA",
-  "MARDIN", "MERSIN", "MUGLA", "MUS", "NEVSEHIR", "NIGDE", "ORDU", "OSMANIYE",
-  "RIZE", "SAKARYA", "SAMSUN", "SIIRT", "SINOP", "SIVAS", "SANLIURFA", "SIRNAK",
-  "TEKIRDAG", "TOKAT", "TRABZON", "TUNCELI", "USAK", "VAN", "YALOVA", "YOZGAT",
-  "ZONGULDAK"
-];
+  // Basit ve dayanıklı yaklaşım: tabloda geçen şehir + sayı desenlerini satır satır yakalamaya çalış.
+  // Petrol Ofisi sayfasında genelde satırlar: Şehir | Kurşunsuz 95 | Diesel | ... | Otogaz [web:23]
+  // Bu parse "mükemmel" değil ama pratikte işe yarar; tutmadığı yerde log ile görürsün.
+  const out = {}; // CITY_KEY -> { benzin, motorin, lpg }
 
-///////////////////////////
-// VERİ YAPISI OLUŞTURMA
-///////////////////////////
+  // Şehir adları Türkçe karakterli olabilir; normalize edeceğiz.
+  // Tablo satırları çoğu zaman <tr> içinde; hızlı regex:
+  const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+  let m;
+  while ((m = rowRegex.exec(html)) !== null) {
+    const row = m[1];
+    const cellText = row
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&nbsp;/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
 
-function buildAllCityPrices() {
-  const cityPrices = {};
-  const cityAverages = {};
+    // "İstanbul 54,xx 56,xx ... 27,xx" gibi
+    // İlk kelime(ler) şehir, sonra 3 sayı yakalamaya çalış.
+    const nums = cellText.match(/(\d{1,3}(?:[.,]\d{1,2})?)/g);
+    if (!nums || nums.length < 2) continue;
 
-  for (const city of ALL_CITIES) {
-    const cityKey = normalizeCityKey(city);
-    const prices = calculateRealPumpPrices(city);
-    
-    cityPrices[cityKey] = prices;
+    // Şehir adını bulmak için satırın başından ilk sayıya kadar olan kısmı al
+    const firstNum = nums[0];
+    const idx = cellText.indexOf(firstNum);
+    if (idx <= 0) continue;
 
-    // Şehir ortalaması (tüm markalar aynı fiyat olduğu için herhangi birini al)
-    const sampleBrand = Object.values(prices)[0];
-    cityAverages[cityKey] = {
-      benzin: sampleBrand.benzin,
-      motorin: sampleBrand.motorin,
-      lpg: sampleBrand.lpg,
-    };
+    const cityRaw = cellText.slice(0, idx).trim();
+    const cityKey = normalizeCityKey(cityRaw);
+    if (!cityKey) continue;
+
+    const benzin = parseTrNumber(nums[0]);
+    const motorin = parseTrNumber(nums[1]);
+
+    // LPG genelde son sütunlarda; en sondaki sayıyı lpg diye almayı dene
+    const lpg = parseTrNumber(nums[nums.length - 1]);
+
+    const rec = {};
+    if (benzin != null) rec.benzin = benzin;
+    if (motorin != null) rec.motorin = motorin;
+    if (lpg != null) rec.lpg = lpg;
+
+    if (Object.keys(rec).length) out[cityKey] = rec;
   }
 
-  return { cityPrices, cityAverages };
+  return { brandKey: "PETROL_OFISI", sourceUrl: url, data: out };
+}
+
+async function scrapeAytemiz() {
+  const url = "https://www.aytemiz.com.tr/akaryakit-fiyatlari/benzin-fiyatlari"; // il bazlı tablo [web:35]
+  const html = await fetchHtml(url);
+
+  const out = {}; // CITY_KEY -> { benzin, motorin }
+  const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+  let m;
+  while ((m = rowRegex.exec(html)) !== null) {
+    const row = m[1];
+    const cellText = row
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&nbsp;/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    const nums = cellText.match(/(\d{1,3}(?:[.,]\d{1,2})?)/g);
+    if (!nums || nums.length < 2) continue;
+
+    const firstNum = nums[0];
+    const idx = cellText.indexOf(firstNum);
+    if (idx <= 0) continue;
+
+    const cityRaw = cellText.slice(0, idx).trim();
+    const cityKey = normalizeCityKey(cityRaw);
+    if (!cityKey) continue;
+
+    const benzin = parseTrNumber(nums[0]);
+    const motorin = parseTrNumber(nums[1]);
+
+    if (benzin == null && motorin == null) continue;
+    out[cityKey] = { benzin: benzin ?? null, motorin: motorin ?? null };
+  }
+
+  return { brandKey: "AYTEMIZ", sourceUrl: url, data: out };
+}
+
+///////////////////////////
+// Build + Cache
+///////////////////////////
+function merge(prices, brandKey, cityMap, meta) {
+  const byBrand = ensure(prices, brandKey, {});
+  for (const [cityKey, v] of Object.entries(cityMap || {})) {
+    byBrand[cityKey] = {
+      benzin: v.benzin ?? null,
+      motorin: v.motorin ?? null,
+      lpg: v.lpg ?? null,
+      source: meta?.sourceUrl || null,
+      fetchedAt: meta?.fetchedAt || null,
+    };
+  }
+}
+
+function buildAverages(prices) {
+  const sums = {}; // CITY -> sums
+  for (const brandKey of Object.keys(prices || {})) {
+    for (const [cityKey, p] of Object.entries(prices[brandKey] || {})) {
+      const s = ensure(sums, cityKey, { bS: 0, bN: 0, mS: 0, mN: 0, lS: 0, lN: 0 });
+      if (typeof p.benzin === "number") { s.bS += p.benzin; s.bN++; }
+      if (typeof p.motorin === "number") { s.mS += p.motorin; s.mN++; }
+      if (typeof p.lpg === "number") { s.lS += p.lpg; s.lN++; }
+    }
+  }
+  const avg = {};
+  for (const [cityKey, s] of Object.entries(sums)) {
+    avg[cityKey] = {
+      benzin: s.bN ? Number((s.bS / s.bN).toFixed(2)) : null,
+      motorin: s.mN ? Number((s.mS / s.mN).toFixed(2)) : null,
+      lpg: s.lN ? Number((s.lS / s.lN).toFixed(2)) : null,
+    };
+  }
+  return avg;
 }
 
 async function updatePrices() {
-  const { cityPrices, cityAverages } = buildAllCityPrices();
+  const fetchedAt = new Date().toISOString();
+  const prices = {};
+  const sources = [];
+
+  // Petrol Ofisi
+  try {
+    const po = await scrapePetrolOfisi();
+    merge(prices, po.brandKey, po.data, { sourceUrl: po.sourceUrl, fetchedAt });
+    sources.push({ brand: po.brandKey, ok: true, url: po.sourceUrl });
+  } catch (e) {
+    sources.push({ brand: "PETROL_OFISI", ok: false, error: String(e.message || e) });
+  }
+
+  // Aytemiz
+  try {
+    const ay = await scrapeAytemiz();
+    merge(prices, ay.brandKey, ay.data, { sourceUrl: ay.sourceUrl, fetchedAt });
+    sources.push({ brand: ay.brandKey, ok: true, url: ay.sourceUrl });
+  } catch (e) {
+    sources.push({ brand: "AYTEMIZ", ok: false, error: String(e.message || e) });
+  }
 
   const dataToStore = {
-    prices: cityPrices,
-    averages: cityAverages,
-    sources: ["epdk", "retail_margin_27.5%"],
-    lastUpdate: new Date().toISOString(),
-    note: "GERÇEK POMPA SATIŞ FİYATLARI - EPDK × 1.275 (Isparta örnek: 43.30 × 1.275 = 55.21₺)",
-    calculation: {
-      method: "EPDK_BASE_PRICE × RETAIL_MARGIN",
-      retail_margin: "27.5%",
-      example_isparta: {
-        epdk_benzin: 43.30,
-        retail_margin: 1.275,
-        pump_price: 55.21,
-        real_price_web: 55.15,
-        error_margin: "0.06₺ (0.1%)"
-      }
-    }
+    prices: toBrandCityShape(prices),
+    averages: buildAverages(prices),
+    sources,
+    lastUpdate: fetchedAt,
+    note: "Fiyatlar marka sitelerindeki il bazlı tablolardan otomatik alınır (KV cache).",
   };
 
   await kvSetJson("fuel:prices", dataToStore);
@@ -199,53 +266,69 @@ async function updatePrices() {
 }
 
 ///////////////////////////
-// API HANDLER'LARI
+// API handlers
 ///////////////////////////
-
 async function handleHealth(_req, res) {
   const kvData = await kvGetJson("fuel:prices");
-  const hasData = kvData && kvData.prices && Object.keys(kvData.prices).length > 0;
+  const hasData = !!(kvData?.prices && Object.keys(kvData.prices).length);
 
   res.status(200).json({
     ok: true,
     hasData,
     lastUpdate: kvData?.lastUpdate || null,
     sources: kvData?.sources || [],
-    note: kvData?.note || "GERÇEK POMPA SATIŞ FİYATLARI",
+    note: kvData?.note || null,
   });
 }
 
 async function handlePrices(req, res) {
-  const kvData = await kvGetJson("fuel:prices");
+  let kvData = await kvGetJson("fuel:prices");
 
-  if (!kvData) {
-    // İlk kez çağrılıyorsa veriyi oluştur
-    const newData = await updatePrices();
-    return res.status(200).json(newData);
+  // Yoksa oluştur
+  if (!kvData) kvData = await updatePrices();
+
+  // Eskiyse arka planda güncelle (response'u bekletmeden)
+  if (hoursSince(kvData?.lastUpdate) > MAX_AGE_HOURS) {
+    updatePrices().catch(() => null);
   }
 
   const url = new URL(req.url || "/", "http://localhost");
   const cityParam = url.searchParams.get("city");
+  const brandParam = url.searchParams.get("brand");
   const cityKey = cityParam ? normalizeCityKey(cityParam) : null;
+  const brandKey = brandParam ? normalizeCityKey(brandParam) : null;
 
-  if (!cityKey) {
-    // Tüm şehirler
+  if (!cityKey && !brandKey) {
+    return res.status(200).json(kvData);
+  }
+
+  if (brandKey && !cityKey) {
     return res.status(200).json({
-      prices: kvData.prices || {},
-      averages: kvData.averages || {},
-      lastUpdate: kvData.lastUpdate || null,
-      sources: kvData.sources || [],
-      note: kvData.note || "",
+      ...kvData,
+      prices: { [brandKey]: kvData.prices?.[brandKey] || {} },
     });
   }
 
-  // Tek şehir
+  if (cityKey && !brandKey) {
+    const byBrand = {};
+    for (const bk of Object.keys(kvData.prices || {})) {
+      if (kvData.prices?.[bk]?.[cityKey]) byBrand[bk] = { [cityKey]: kvData.prices[bk][cityKey] };
+    }
+    return res.status(200).json({
+      ...kvData,
+      prices: byBrand,
+      averages: kvData.averages?.[cityKey] ? { [cityKey]: kvData.averages[cityKey] } : {},
+    });
+  }
+
   return res.status(200).json({
-    prices: kvData.prices?.[cityKey] || {},
+    ...kvData,
+    prices: {
+      [brandKey]: {
+        [cityKey]: kvData.prices?.[brandKey]?.[cityKey] || {},
+      },
+    },
     averages: kvData.averages?.[cityKey] ? { [cityKey]: kvData.averages[cityKey] } : {},
-    lastUpdate: kvData.lastUpdate || null,
-    sources: kvData.sources || [],
-    note: kvData.note || "",
   });
 }
 
@@ -254,10 +337,6 @@ async function handleUpdate(_req, res) {
   res.status(200).json({ ok: true, ...result });
 }
 
-///////////////////////////
-// MAIN EXPORT
-///////////////////////////
-
 module.exports = async (req, res) => {
   res.setHeader("Cache-Control", "s-maxage=3600, stale-while-revalidate");
 
@@ -265,8 +344,8 @@ module.exports = async (req, res) => {
   const p = url.pathname;
 
   if (p.endsWith("/health")) return handleHealth(req, res);
-  if (p.endsWith("/prices")) return handlePrices(req, res);
   if (p.endsWith("/update")) return handleUpdate(req, res);
+  if (p.endsWith("/prices")) return handlePrices(req, res);
 
   return handlePrices(req, res);
 };
