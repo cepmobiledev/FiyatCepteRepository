@@ -1,13 +1,12 @@
+json
 {
-  "rewrites": [
-    { "source": "/api/prices", "destination": "/api/cloud.js" },
-    { "source": "/api/update", "destination": "/api/cloud.js" },
-    { "source": "/api/health", "destination": "/api/cloud.js" }
-  ],
-  "crons": [
-    {
-      "path": "/api/update",
-      "schedule": "0 4 * * *"
+  "functions": {
+    "api/cloud.js": {
+      "maxDuration": 60
     }
-  ]
+  },
+  "crons": [{
+    "path": "/api/update",
+    "schedule": "0 4 * * *"
+  }]
 }
