@@ -1,8 +1,7 @@
 {
   "functions": {
-    "api/cloud.js": {
-      "maxDuration": 60
-    }
+    "api/update.js": { "maxDuration": 60 },
+    "api/prices.js": { "maxDuration": 60 }
   },
   "crons": [
     { "path": "/api/update", "schedule": "0 4 * * *" }
